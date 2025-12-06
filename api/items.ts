@@ -4,7 +4,6 @@ import {HTTPException} from 'hono/http-exception'
 import {z} from 'zod'
 import {zValidator} from '@hono/zod-validator'
 import sql from 'sql-template-strings'
-import {broadcast} from './sse'
 
 export const routes = new Hono()
 
@@ -220,13 +219,21 @@ routes.post('/items/lists/:listId/items', zValidator('param', z.object({
       `
     )
     
-    // Fetch the created item
+    // Fetch the created item with vote_count (0 for new items)
     const item = await db.get(
-      sql`SELECT * FROM items WHERE id = ${id}`
+      sql`
+        SELECT 
+          i.*,
+          0 as vote_count,
+          0 as has_voted
+        FROM items i
+        WHERE i.id = ${id}
+      `
     )
     
-    // Broadcast the creation event
-    broadcast(listId, { type: 'item.created', data: item })
+    // Broadcast the creation event with full item details
+    // @ts-ignore
+    globalThis.speedSSE?.emit(`list:${listId}`, { type: 'item.created', data: item })
     
     return ctx.json(item)
   } catch (err) {
@@ -295,15 +302,31 @@ routes.put('/items/:id', zValidator('param', z.object({
     await db.run(query, values)
   }
   
-  // Fetch updated item
+  // Fetch updated item with vote_count
   const updatedItem = await db.get(
-    sql`SELECT * FROM items WHERE id = ${id}`
+    sql`
+      SELECT 
+        i.*,
+        COUNT(v.item_id) as vote_count
+      FROM items i
+      LEFT JOIN votes v ON i.id = v.item_id
+      WHERE i.id = ${id}
+      GROUP BY i.id
+    `
   )
   
-  // Broadcast the update event
-  broadcast(item.list_id, { type: 'item.updated', data: updatedItem })
+  // Add has_voted as false (server doesn't know user's vote status)
+  const itemWithVotes = {
+    ...updatedItem,
+    vote_count: Number(updatedItem.vote_count),
+    has_voted: false
+  }
   
-  return ctx.json(updatedItem)
+  // Broadcast the update event with full item details
+  // @ts-ignore
+  globalThis.speedSSE?.emit(`list:${item.list_id}`, { type: 'item.updated', data: itemWithVotes })
+  
+  return ctx.json(itemWithVotes)
 })
 
 // 4. DELETE /items/:id - Delete an item
@@ -334,8 +357,12 @@ routes.delete('/items/:id', zValidator('param', z.object({
       sql`DELETE FROM items WHERE id = ${id}`
     )
     
-    // Broadcast the deletion event
-    broadcast(item.list_id, { type: 'item.deleted', id: id })
+    // Broadcast the deletion event with only the ID
+    // @ts-ignore
+    globalThis.speedSSE?.emit(`list:${item.list_id}`, { 
+      type: 'item.deleted', 
+      id: id
+    })
     
     return ctx.json({ success: true })
   } catch (err) {
@@ -394,7 +421,8 @@ routes.put('/items/lists/:listId/reorder', zValidator('param', z.object({
     await db.run('COMMIT')
     
     // Broadcast the reorder event
-    broadcast(listId, { type: 'items.reordered', itemIds: itemIds })
+    // @ts-ignore
+    globalThis.speedSSE?.emit(`list:${listId}`, { type: 'items.reordered', itemIds: itemIds })
     
     return ctx.json({ success: true })
   } catch (err) {

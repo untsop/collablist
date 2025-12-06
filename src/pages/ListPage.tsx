@@ -85,16 +85,30 @@ export default function ListPage() {
         const eventSource = new EventSource(`/api/sse/lists/${listWithRole.list.id}/events?token=${encodeURIComponent(token)}`);
         
         eventSource.addEventListener('update', (event) => {
+          console.log('SSE update event received:', event.type, event.data);
           try {
             const data = JSON.parse(event.data);
+            console.log('Parsed SSE data:', data);
             handleSSEEvent(data);
           } catch (err) {
             console.error('Error parsing SSE event:', err);
           }
         });
         
+        // Also listen for 'message' events as a fallback
+        eventSource.addEventListener('message', (event) => {
+          console.log('SSE message event received:', event.type, event.data);
+          try {
+            const data = JSON.parse(event.data);
+            console.log('Parsed SSE message data:', data);
+            handleSSEEvent(data);
+          } catch (err) {
+            console.error('Error parsing SSE message event:', err);
+          }
+        });
+        
         eventSource.addEventListener('system', (event) => {
-          console.log('SSE system event:', event.data);
+          console.log('SSE system event received:', event.type, event.data);
         });
         
         eventSource.onopen = () => {
@@ -126,6 +140,7 @@ export default function ListPage() {
 
   // Handle SSE events
   const handleSSEEvent = useCallback((data: any) => {
+    console.log('handleSSEEvent called with:', data);
     switch (data.type) {
       case 'list.updated':
         setListWithRole(prev => prev ? {
@@ -140,18 +155,48 @@ export default function ListPage() {
           if (prev.some(item => item.id === data.data.id)) {
             return prev;
           }
-          return [...prev, data.data];
+          // Use the full item data from server, preserving local has_voted state
+          const existingItem = prev.find(item => item.id === data.data.id);
+          const newItem = {
+            ...data.data,
+            vote_count: data.data.vote_count !== undefined ? data.data.vote_count : 0,
+            has_voted: existingItem?.has_voted !== undefined ? existingItem.has_voted : false
+          };
+          return [...prev, newItem];
         });
         break;
         
       case 'item.updated':
-        setItems(prev => prev.map(item => 
-          item.id === data.data.id ? { ...item, ...data.data } : item
-        ));
+        setItems(prev => prev.map(item => {
+          if (item.id === data.data.id) {
+            // Merge the full item data from server while preserving local has_voted state
+            return {
+              ...item,
+              ...data.data,
+              vote_count: data.data.vote_count !== undefined ? data.data.vote_count : item.vote_count,
+              has_voted: item.has_voted // Preserve local vote state
+            };
+          }
+          return item;
+        }));
         break;
         
       case 'item.deleted':
         setItems(prev => prev.filter(item => item.id !== data.id));
+        break;
+        
+      case 'vote.updated':
+        setItems(prev => prev.map(item => {
+          if (item.id === data.data.id) {
+            // Use full item data from server, preserving local has_voted state
+            return {
+              ...item,
+              ...data.data,
+              has_voted: item.has_voted // Preserve local vote state
+            };
+          }
+          return item;
+        }));
         break;
         
       case 'items.reordered':
@@ -186,9 +231,15 @@ export default function ListPage() {
         return itemsCopy.sort((a, b) => a.position - b.position);
         
       case 'vote':
-        return itemsCopy.sort((a, b) => 
-          (b.vote_count || 0) - (a.vote_count || 0)
-        );
+        return itemsCopy.sort((a, b) => {
+          const aVotes = a.vote_count || 0;
+          const bVotes = b.vote_count || 0;
+          if (bVotes !== aVotes) {
+            return bVotes - aVotes;
+          }
+          // Tie-breaker: newer items first (by created_at)
+          return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+        });
         
       default:
         return itemsCopy;
@@ -295,10 +346,33 @@ export default function ListPage() {
   const handleVote = async (itemId: string) => {
     try {
       // Use the toggle endpoint (POST to vote/unvote)
-      await fetchWithAuth(`/api/votes/items/${itemId}/vote`, {
+      const response = await fetchWithAuth(`/api/votes/items/${itemId}/vote`, {
         method: 'POST'
       });
-      // SSE will handle the update
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Failed to vote');
+      }
+      
+      const result = await response.json();
+      const voted = result.voted; // true if vote was added, false if removed
+      
+      // Update local state immediately
+      setItems(prev => prev.map(item => {
+        if (item.id === itemId) {
+          const currentVoteCount = item.vote_count || 0;
+          const newVoteCount = voted ? currentVoteCount + 1 : Math.max(0, currentVoteCount - 1);
+          return {
+            ...item,
+            vote_count: newVoteCount,
+            has_voted: voted
+          };
+        }
+        return item;
+      }));
+      
+      // SSE will also send an update with the exact count
     } catch (err) {
       console.error('Error voting:', err);
       alert('Failed to vote: ' + (err instanceof Error ? err.message : 'Unknown error'));

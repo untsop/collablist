@@ -4,7 +4,6 @@ import {HTTPException} from 'hono/http-exception'
 import {z} from 'zod'
 import {zValidator} from '@hono/zod-validator'
 import sql from 'sql-template-strings'
-import {broadcast} from './sse'
 
 export const routes = new Hono()
 
@@ -212,7 +211,8 @@ routes.put('/lists/:id', zValidator('param', z.object({
   )
   
   // Broadcast the list update event
-  broadcast(id, { type: 'list.updated', data: updatedList })
+  // @ts-ignore
+  globalThis.speedSSE?.emit(`list:${id}`, { type: 'list.updated', data: updatedList })
   
   return ctx.json(updatedList)
 })

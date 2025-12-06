@@ -4,7 +4,6 @@ import {HTTPException} from 'hono/http-exception'
 import {z} from 'zod'
 import {zValidator} from '@hono/zod-validator'
 import sql from 'sql-template-strings'
-import {broadcast} from './sse'
 
 export const routes = new Hono()
 
@@ -51,10 +50,14 @@ async function checkReadAccess(listId: string, userId: string | undefined, colla
 routes.post('/votes/items/:itemId/vote', zValidator('param', z.object({
   itemId: z.string().uuid()
 })), async ctx => {
+  console.log('[VOTE] ===== VOTE ENDPOINT CALLED =====')
   const {itemId} = ctx.req.valid('param')
+  console.log('[VOTE] itemId:', itemId)
   const userId = ctx.var.userId
+  console.log('[VOTE] userId:', userId)
   const collabToken = ctx.req.header('x-collab-token') || null
   const anonymousId = ctx.req.header('x-anonymous-id') || null
+  console.log('[VOTE] anonymousId:', anonymousId)
   
   // 1. Fetch Context: Get the item with list details
   const itemWithList = await db.get(
@@ -156,14 +159,34 @@ routes.post('/votes/items/:itemId/vote', zValidator('param', z.object({
       }
     }
     
-    // Get the updated vote count for this item
-    const voteCountResult = await db.get(
-      sql`SELECT COUNT(*) as count FROM votes WHERE item_id = ${itemId}`
+    // Get the full item details with updated vote count
+    const itemWithVotes = await db.get(
+      sql`
+        SELECT 
+          i.*,
+          COUNT(v.item_id) as vote_count
+        FROM items i
+        LEFT JOIN votes v ON i.id = v.item_id
+        WHERE i.id = ${itemId}
+        GROUP BY i.id
+      `
     )
-    const score = voteCountResult ? Number(voteCountResult.count) : 0
     
-    // Broadcast the vote update event
-    broadcast(list_id, { type: 'vote.updated', itemId: itemId, score: score })
+    console.log('[VOTE] About to broadcast for list_id:', list_id)
+    console.log('[VOTE] itemWithVotes:', itemWithVotes)
+    
+    // Add has_voted as false (server doesn't know user's vote status)
+    const fullItemData = {
+      ...itemWithVotes,
+      vote_count: Number(itemWithVotes.vote_count),
+      has_voted: false
+    }
+    
+    console.log('[VOTE] Calling broadcast now...')
+    // Broadcast the vote update event with full item details
+    // @ts-ignore
+    globalThis.speedSSE?.emit(`list:${list_id}`, { type: 'vote.updated', data: fullItemData })
+    console.log('[VOTE] Broadcast called successfully')
     
     return ctx.json({ voted })
   } catch (err) {

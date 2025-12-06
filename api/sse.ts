@@ -10,13 +10,9 @@ import type {SSEStreamingApi} from 'hono/streaming'
 
 export const routes = new Hono()
 
-// Global EventEmitter for SSE broadcasting
-class ListEventEmitter extends EventEmitter {}
-const listEventEmitter = new ListEventEmitter()
-
-// Helper function to broadcast events to all clients listening to a specific list
-export function broadcast(listId: string, data: any): void {
-  listEventEmitter.emit(`list:${listId}`, data)
+// Initialize global EventEmitter for SSE broadcasting
+if (!(globalThis as any).speedSSE) {
+  (globalThis as any).speedSSE = new EventEmitter()
 }
 
 // Helper function to check if user is collaborator
@@ -88,11 +84,15 @@ routes.get('/sse/lists/:listId/events', zValidator('param', z.object({
   ctx.header('Cache-Control', 'no-cache')
   ctx.header('Connection', 'keep-alive')
   
+  // Log client connection
+  console.log('[SSE] Client connected to list:', listId)
+  
   // Create the SSE stream
   return streamSSE(ctx, async (stream: SSEStreamingApi) => {
     // Event listener for this specific list
     const eventHandler = (data: any) => {
       try {
+        console.log(`[SSE] Sending update for list ${listId}:`, data.type || 'unknown')
         stream.writeSSE({
           data: JSON.stringify(data),
           event: 'update'
@@ -104,8 +104,15 @@ routes.get('/sse/lists/:listId/events', zValidator('param', z.object({
     }
     
     // Subscribe to events for this list
-    const eventName = `list:${listId}`
-    listEventEmitter.on(eventName, eventHandler)
+    const eventName = `list:${String(listId)}`
+    console.log(`[SSE] Adding listener for ${eventName}`)
+    // @ts-ignore
+    globalThis.speedSSE.on(eventName, eventHandler)
+    
+    // Log listener count after registration
+    // @ts-ignore
+    const listenerCount = globalThis.speedSSE.listenerCount(eventName)
+    console.log(`[SSE] Listener count for ${eventName}:`, listenerCount)
     
     // Send initial connection message
     stream.writeSSE({
@@ -115,8 +122,11 @@ routes.get('/sse/lists/:listId/events', zValidator('param', z.object({
     
     // Handle client disconnection
     stream.onAbort(() => {
-      listEventEmitter.off(eventName, eventHandler)
-      console.log(`SSE connection closed for list ${listId}`)
+      // @ts-ignore
+      globalThis.speedSSE.off(eventName, eventHandler)
+      // @ts-ignore
+      const remainingListeners = globalThis.speedSSE.listenerCount(eventName)
+      console.log(`[SSE] Removing listener for ${eventName}, connection closed for list ${String(listId)}, remaining listeners: ${remainingListeners}`)
     })
     
     // Keep the connection open
